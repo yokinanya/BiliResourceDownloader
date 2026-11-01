@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { toDataURL } from 'qrcode'
 import { ElMessage } from "element-plus";
-import { checkLoginState, clearLoginCookie, saveLoginCookie, userLoggedIn } from "../utils/loginManager.ts";
+import { clearLoginCookie, saveLoginCookie, userLoggedIn } from "../utils/loginManager.ts";
 import { APIFetch } from "../APIFetch.ts";
 import { GeneralAPIResponse } from "../types.ts";
-import { emitter } from "../main.ts";
+import { loginCookiesFromResponse } from "../utils/loginCookies.ts";
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
@@ -13,7 +13,6 @@ const qrCodeData = ref('')
 // 是否正在进行登录
 const loggingIn = ref(false)
 const login = async () => {
-  userLoggedIn.value = await checkLoginState()
   if (userLoggedIn.value) {
     ElMessage({
       message: '已经登录！',
@@ -23,70 +22,73 @@ const login = async () => {
   }
 
   loggingIn.value = true
-  const resp = await APIFetch<{
-    url: string
-    qrcode_key: string
-  }>('https://passport.bilibili.com/x/passport-login/web/qrcode/generate', undefined, { useCache: false })
-  if (resp.code !== 0) {
-    console.error(resp)
-    ElMessage({
-      message: '获取登录二维码出错：' + resp.message,
-      type: 'error',
-    })
-    return
-  }
-
-  const { url, qrcode_key } = resp.data
-  qrCodeData.value = await toDataURL(url)
-
-  const pollURL = new URL('https://passport.bilibili.com/x/passport-login/web/qrcode/poll')
-  pollURL.searchParams.append('qrcode_key', qrcode_key)
-
-  let pollResp: GeneralAPIResponse<{
-    url: string
-    refresh_token: string
-    code: number
-    message: string
-  }>
-
-  do {
-    await sleep(1000)
-
-    pollResp = await APIFetch(pollURL, undefined, { useCache: false })
-
-    console.log(pollResp)
-
-    if (pollResp.code !== 0) {
-      console.error(pollResp)
+  try {
+    const resp = await APIFetch<{
+      url: string
+      qrcode_key: string
+    }>('https://passport.bilibili.com/x/passport-login/web/qrcode/generate', undefined, { useCache: false })
+    if (resp.code !== 0) {
+      console.error(resp)
       ElMessage({
-        message: '获取登录信息出错：' + pollResp.message,
+        message: '获取登录二维码出错：' + resp.message,
         type: 'error',
       })
       return
     }
-  } while (pollResp.data.code === 86101 || pollResp.data.code === 86090)
 
-  if (pollResp.data.code === 86038) {
-    console.error(pollResp)
-    ElMessage({
-      message: '二维码已失效，请重新刷新',
-      type: 'error',
-    })
-    loggingIn.value = false
-    return
-  }
+    const { url, qrcode_key } = resp.data
+    qrCodeData.value = await toDataURL(url)
 
-  if (pollResp.data.code === 0) {
-    ElMessage({
-      message: '登录成功',
-      type: 'success',
-    })
+    const pollURL = new URL('https://passport.bilibili.com/x/passport-login/web/qrcode/poll')
+    pollURL.searchParams.append('qrcode_key', qrcode_key)
 
-    const loginURL = new URL(pollResp.data.url)
-    const params = loginURL.search.substring(1).split('&').join('; ')
+    let pollResp: GeneralAPIResponse<{
+      url: string
+      refresh_token: string
+      code: number
+      message: string
+    }>
 
-    await saveLoginCookie(params)
-    userLoggedIn.value = true
+    let pollHeaders: Headers | undefined
+    do {
+      await sleep(1000)
+
+      pollResp = await APIFetch(pollURL, undefined, {
+        useCache: false,
+        useCookie: false,
+        onResponse: response => { pollHeaders = response.headers },
+      })
+
+      if (pollResp.code !== 0) {
+        console.error(pollResp)
+        ElMessage({
+          message: '获取登录信息出错：' + pollResp.message,
+          type: 'error',
+        })
+        return
+      }
+    } while (pollResp.data.code === 86101 || pollResp.data.code === 86090)
+
+    if (pollResp.data.code === 86038) {
+      console.error(pollResp)
+      ElMessage({
+        message: '二维码已失效，请重新刷新',
+        type: 'error',
+      })
+      return
+    }
+
+    if (pollResp.data.code === 0) {
+      if (!pollHeaders) throw new Error('扫码登录响应缺少响应头')
+      await saveLoginCookie(loginCookiesFromResponse(pollHeaders))
+      ElMessage({
+        message: '登录成功',
+        type: 'success',
+      })
+    } else {
+      throw new Error(`扫码登录失败：${pollResp.data.message} (${pollResp.data.code})`)
+    }
+  } finally {
     loggingIn.value = false
   }
 }
@@ -98,11 +100,6 @@ const logoff = async () => {
     type: 'success',
   })
 }
-
-// 该组件位于 drawer 内是懒加载的，所以页面首次渲染时触发的事件与该回调处于同个任务循环，因此不需要 onMounted 来触发刷新，否则会导致任务列表重复
-emitter.on('loginDrawerOpen', async () => {
-  userLoggedIn.value = await checkLoginState()
-})
 
 const testLoginState = async () => {
   let resp: GeneralAPIResponse<{
@@ -116,6 +113,7 @@ const testLoginState = async () => {
     }>(`https://api.bilibili.com/x/web-interface/nav`, undefined, { useCache: false, useCookie: true })
   } catch (e) {
     if ((e as GeneralAPIResponse<unknown>).code === -101) {
+      userLoggedIn.value = false
       ElMessage({
         message: '当前账号未登录',
         type: 'error',
@@ -136,6 +134,8 @@ const testLoginState = async () => {
       message: '登录成功，欢迎 ' + resp.data.uname,
       type: 'success',
     })
+  } else {
+    ElMessage({ message: '当前账号未登录', type: 'error' })
   }
 }
 </script>

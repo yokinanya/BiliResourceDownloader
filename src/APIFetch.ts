@@ -1,5 +1,5 @@
 import { LazyStore } from '@tauri-apps/plugin-store';
-import { clearLoginCookie, getLoginCookie, userLoggedIn } from "./utils/loginManager.ts";
+import { getLoginCookie } from "./utils/loginManager.ts";
 import { GeneralAPIResponse } from "./types.ts";
 import { encWbiWithFetch } from "./utils/wbi.ts";
 import { useWbiStore } from "./store/useWbiStore";
@@ -27,6 +27,7 @@ interface ExtraAPIFetchOptions {
     appSign?: boolean
     useCache?: boolean
     useCookie?: boolean
+    onResponse?: (response: Response) => void
     debug?: {
         name: string
         extraParams?: Record<string, string>
@@ -51,7 +52,7 @@ async function APIFetch<T>(url: URL | string, init?: RequestInit, extraOptions?:
     const parsedURL = new URL(url)
     const getURLStr = () => parsedURL.toString()
 
-    const { useCache, wbiSign, appSign, useCookie, debug: debugInfo } = {
+    const { useCache, wbiSign, appSign, useCookie, onResponse, debug: debugInfo } = {
         useCache: true,
         wbiSign: false,
         appSign: false,
@@ -110,7 +111,9 @@ async function APIFetch<T>(url: URL | string, init?: RequestInit, extraOptions?:
     let json: GeneralAPIResponse<T>
 
     do {
-        json = await fetch(parsedURL, finalOptions).then(r => r.json()) as GeneralAPIResponse<T>
+        const response = await fetch(parsedURL, finalOptions)
+        onResponse?.(response)
+        json = await response.json() as GeneralAPIResponse<T>
 
         if (json.code !== 0) {
             if ((json.code === -352 || json.code === -403) && retryCount < 1) {
@@ -120,12 +123,6 @@ async function APIFetch<T>(url: URL | string, init?: RequestInit, extraOptions?:
 
                 retryCount++
                 continue
-            }
-
-            // 账号登录失效时清空登录信息
-            if (json.code === -101) {
-                userLoggedIn.value = false
-                await clearLoginCookie()
             }
 
             if (debugInfo) {
